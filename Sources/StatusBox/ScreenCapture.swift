@@ -26,9 +26,9 @@ enum ScreenCapture {
             case .image:
                 return ""
             case .permissionDenied:
-                return "화면 기록 권한을 허용한 뒤 앱을 다시 실행하세요"
+                return "Allow Screen Recording access, then restart the app."
             case .failed:
-                return "메뉴 막대 이미지를 가져올 수 없습니다"
+                return "Unable to capture the menu bar image."
             }
         }
     }

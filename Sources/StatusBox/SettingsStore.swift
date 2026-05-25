@@ -12,9 +12,13 @@ final class SettingsStore: ObservableObject {
         self.defaults = defaults
         if let data = defaults.data(forKey: key),
            let decoded = try? JSONDecoder().decode(AppSettings.self, from: data) {
-            self.settings = decoded
+            var normalized = decoded
+            Self.normalize(&normalized)
+            self.settings = normalized
         } else {
-            self.settings = .defaults
+            var defaults = AppSettings.defaults
+            Self.normalize(&defaults)
+            self.settings = defaults
         }
         refreshDisplays()
     }
@@ -22,40 +26,30 @@ final class SettingsStore: ObservableObject {
     func update(_ mutate: (inout AppSettings) -> Void) {
         var copy = settings
         mutate(&copy)
+        Self.normalize(&copy)
         settings = copy
         persist(copy)
     }
 
+    func resetToDefaults() {
+        var defaults = AppSettings.defaults
+        Self.normalize(&defaults)
+        settings = defaults
+        persist(defaults)
+    }
+
     func refreshDisplays() {
         update { settings in
-            let now = Date()
-            if settings.defaultDisplayMode == .box && !settings.boxFeatureEnabled {
-                settings.defaultDisplayMode = .menuBar
-            }
-            for screen in NSScreen.screens {
-                let id = screen.statusBoxDisplayId
-                var policy = settings.displayPolicies[id] ?? DisplayPolicy(
-                    displayId: id,
-                    displayName: screen.localizedName,
-                    mode: settings.defaultDisplayMode,
-                    lastSeenAt: now
-                )
-                policy.displayName = screen.localizedName
-                policy.lastSeenAt = now
-                if policy.mode == .box && !settings.boxFeatureEnabled {
-                    policy.mode = .menuBar
-                }
-                settings.displayPolicies[id] = policy
-
-            }
+            settings.defaultDisplayMode = .menuBar
+            settings.displayPolicies = [:]
         }
     }
 
     func policy(for screen: NSScreen) -> DisplayPolicy {
-        settings.displayPolicies[screen.statusBoxDisplayId] ?? DisplayPolicy(
+        DisplayPolicy(
             displayId: screen.statusBoxDisplayId,
             displayName: screen.localizedName,
-            mode: settings.defaultDisplayMode,
+            mode: .menuBar,
             lastSeenAt: Date()
         )
     }
@@ -96,6 +90,29 @@ final class SettingsStore: ObservableObject {
     private func persist(_ settings: AppSettings) {
         if let data = try? JSONEncoder().encode(settings) {
             defaults.set(data, forKey: key)
+        }
+    }
+
+    private static func normalize(_ settings: inout AppSettings) {
+        settings.boxMaxColumns = max(1, min(20, settings.boxMaxColumns))
+
+        if !BoxIconAction.clickActionCases.contains(settings.boxIconLeftClickAction) {
+            settings.boxIconLeftClickAction = .toggleHiddenIcons
+        }
+        if !BoxIconAction.clickActionCases.contains(settings.boxIconRightClickAction) {
+            settings.boxIconRightClickAction = .showBoxUI
+        }
+
+        normalizeShortcut(&settings.menuBarIconShortcut, fallback: .defaultMenuBarIcon)
+        normalizeShortcut(&settings.boxUIShortcut, fallback: .defaultBoxUI)
+    }
+
+    private static func normalizeShortcut(
+        _ shortcut: inout KeyboardShortcutSetting,
+        fallback: KeyboardShortcutSetting
+    ) {
+        if shortcut.key.isEmpty || shortcut.keyCode > 127 || shortcut.modifiers.isEmpty {
+            shortcut = fallback
         }
     }
 }

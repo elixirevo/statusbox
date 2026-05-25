@@ -121,11 +121,34 @@ struct MenuBarProxyMenuSelection: @unchecked Sendable {
 }
 
 enum MenuBarProxyScanner {
+    struct RunningApplicationInfo: @unchecked Sendable {
+        let processIdentifier: pid_t
+        let bundleIdentifier: String
+        let localizedName: String
+        let icon: NSImage?
+    }
+
     private struct MenuWindowProbe {
         let bounds: CGRect
         let layer: Int
         let ownerMatchesTarget: Bool
         let distance: CGFloat
+    }
+
+    private static let statusItemScanMessagingTimeout: Float = 0.15
+
+    static func runningApplicationInfo(excludingProcessIdentifier excludedPID: pid_t) -> [RunningApplicationInfo] {
+        NSWorkspace.shared.runningApplications.compactMap { app in
+            guard app.processIdentifier > 0, app.processIdentifier != excludedPID else {
+                return nil
+            }
+            return RunningApplicationInfo(
+                processIdentifier: app.processIdentifier,
+                bundleIdentifier: app.bundleIdentifier ?? "",
+                localizedName: app.localizedName ?? "",
+                icon: app.icon
+            )
+        }
     }
 
     static func targets(in appKitRect: NSRect) -> [MenuBarProxyTarget] {
@@ -164,19 +187,40 @@ enum MenuBarProxyScanner {
     }
 
     static func targetsBeforeMarker(tapeFrame: NSRect, excludingProcessIdentifier excludedPID: pid_t) -> [MenuBarProxyTarget] {
+        targetsBeforeMarker(
+            tapeFrame: tapeFrame,
+            runningApplications: runningApplicationInfo(excludingProcessIdentifier: excludedPID)
+        )
+    }
+
+    static func targetsBeforeMarker(
+        tapeFrame: NSRect,
+        runningApplications: [RunningApplicationInfo]
+    ) -> [MenuBarProxyTarget] {
         guard ClickForwarder.accessibilityTrusted else {
             return []
         }
 
+        let startedAt = CFAbsoluteTimeGetCurrent()
         let markerX = tapeFrame.minX
         var targetsByKey: [String: MenuBarProxyTarget] = [:]
+        let applicationInfoByPID = Dictionary(uniqueKeysWithValues: runningApplications.map {
+            ($0.processIdentifier, $0)
+        })
 
-        for app in NSWorkspace.shared.runningApplications where app.processIdentifier > 0 && app.processIdentifier != excludedPID {
+        for app in runningApplications {
             let appElement = AXUIElementCreateApplication(app.processIdentifier)
+            applyStatusItemScanTimeout(to: appElement)
             let bars = accessibilityElements(attribute: "AXExtrasMenuBar", from: appElement)
             for bar in bars {
+                applyStatusItemScanTimeout(to: bar)
                 for item in accessibilityElements(attribute: kAXChildrenAttribute as String, from: bar) {
-                    guard let target = target(from: item, clippingRect: nil),
+                    applyStatusItemScanTimeout(to: item)
+                    guard let target = target(
+                            from: item,
+                            clippingRect: nil,
+                            applicationInfoByPID: applicationInfoByPID
+                          ),
                           target.appKitFrame.maxX <= markerX + 1 else {
                         continue
                     }
@@ -184,6 +228,14 @@ enum MenuBarProxyScanner {
                 }
             }
         }
+
+        let elapsedMilliseconds = (CFAbsoluteTimeGetCurrent() - startedAt) * 1000
+        NSLog(
+            "[StatusBox] Status item scan loaded %ld targets from %ld apps in %.1fms",
+            targetsByKey.count,
+            runningApplications.count,
+            elapsedMilliseconds
+        )
 
         return Array(targetsByKey.values).sorted { $0.appKitFrame.minX < $1.appKitFrame.minX }
     }
@@ -326,7 +378,11 @@ enum MenuBarProxyScanner {
         target(from: element, clippingRect: appKitRect)
     }
 
-    private static func target(from element: AXUIElement, clippingRect appKitRect: NSRect?) -> MenuBarProxyTarget? {
+    private static func target(
+        from element: AXUIElement,
+        clippingRect appKitRect: NSRect?,
+        applicationInfoByPID: [pid_t: RunningApplicationInfo]? = nil
+    ) -> MenuBarProxyTarget? {
         guard let frame = appKitFrame(for: element) else {
             return nil
         }
@@ -353,9 +409,10 @@ enum MenuBarProxyScanner {
         let actions = actionNames(from: element)
         var pid: pid_t = 0
         AXUIElementGetPid(element, &pid)
-        let app = NSRunningApplication(processIdentifier: pid)
-        let bundleIdentifier = app?.bundleIdentifier ?? ""
-        let appName = app?.localizedName ?? ""
+        let applicationInfo = applicationInfoByPID?[pid]
+        let app = applicationInfo == nil ? NSRunningApplication(processIdentifier: pid) : nil
+        let bundleIdentifier = applicationInfo?.bundleIdentifier ?? app?.bundleIdentifier ?? ""
+        let appName = applicationInfo?.localizedName ?? app?.localizedName ?? ""
         let isMenuBarItem = role == "AXMenuBarItem"
         let isActionableMenuBarItem = isMenuBarItem &&
             (actions.isEmpty || actions.contains(kAXPressAction) || actions.contains(kAXShowMenuAction))
@@ -387,7 +444,7 @@ enum MenuBarProxyScanner {
             processIdentifier: pid,
             bundleIdentifier: bundleIdentifier,
             appName: appName,
-            icon: app?.icon
+            icon: applicationInfo?.icon ?? app?.icon
         )
     }
 
@@ -500,6 +557,10 @@ enum MenuBarProxyScanner {
         }
 
         return []
+    }
+
+    private static func applyStatusItemScanTimeout(to element: AXUIElement) {
+        AXUIElementSetMessagingTimeout(element, statusItemScanMessagingTimeout)
     }
 
     private static func applicationElements(matching target: MenuBarProxyTarget) -> [AXUIElement] {
@@ -867,17 +928,17 @@ enum MenuBarProxyScanner {
     private static func fallbackLabel(for role: String) -> String {
         switch role {
         case "AXMenuItem":
-            return "메뉴 항목"
+            return "Menu item"
         case "AXButton":
-            return "버튼"
+            return "Button"
         case "AXCheckBox":
-            return "체크박스"
+            return "Checkbox"
         case "AXRadioButton":
-            return "라디오 버튼"
+            return "Radio button"
         case "AXPopUpButton":
-            return "팝업 버튼"
+            return "Pop-up button"
         case "AXGroup", "AXRow", "AXCell":
-            return "항목"
+            return "Item"
         default:
             return ""
         }

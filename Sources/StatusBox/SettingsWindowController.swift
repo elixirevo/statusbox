@@ -13,7 +13,7 @@ final class SettingsWindowController: NSWindowController {
         let view = SettingsView(store: store, actions: actions)
         let hosting = NSHostingController(rootView: view)
         let window = NSWindow(contentViewController: hosting)
-        window.title = "Status Box 설정"
+        window.title = "Status Box Settings"
         window.setContentSize(NSSize(width: 620, height: 520))
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
         window.isReleasedWhenClosed = false
@@ -38,98 +38,241 @@ struct SettingsActions {
     var hideHiddenIcons: () -> Void
     var requestAccessibility: () -> Void
     var requestScreenRecording: () -> Void
+    var setShortcutRecordingActive: (Bool) -> Void
     var setLaunchAtLogin: (Bool) -> Void
+}
+
+private enum ShortcutRecordingTarget {
+    case menuBarIcon
+    case boxUI
 }
 
 struct SettingsView: View {
     @ObservedObject var store: SettingsStore
     let actions: SettingsActions
+    @State private var shortcutRecordingTarget: ShortcutRecordingTarget?
+    @State private var shortcutMonitor: Any?
+    @State private var isShowingResetConfirmation = false
+    private let autoHideDelayOptions: [Double] = [5, 10, 15, 20, 30, 60]
 
     var body: some View {
         TabView {
             generalTab
-                .tabItem { Label("일반", systemImage: "gearshape") }
+                .tabItem { Label("General", systemImage: "gearshape") }
             displayTab
-                .tabItem { Label("표시", systemImage: "menubar.rectangle") }
-            monitorTab
-                .tabItem { Label("모니터", systemImage: "display.2") }
+                .tabItem { Label("Display", systemImage: "menubar.rectangle") }
             permissionTab
-                .tabItem { Label("권한", systemImage: "lock.shield") }
+                .tabItem { Label("Permissions", systemImage: "lock.shield") }
         }
         .padding(20)
         .frame(minWidth: 560, minHeight: 460)
+        .onDisappear {
+            stopShortcutCapture()
+        }
     }
 
     private var generalTab: some View {
         Form {
-            Toggle("로그인 시 자동 실행", isOn: Binding(
-                get: { store.settings.launchAtLogin },
-                set: { enabled in
-                    store.update { $0.launchAtLogin = enabled }
-                    actions.setLaunchAtLogin(enabled)
-                }
-            ))
+            Section("General") {
+                Toggle("Launch at login", isOn: Binding(
+                    get: { store.settings.launchAtLogin },
+                    set: { enabled in
+                        store.update { $0.launchAtLogin = enabled }
+                        actions.setLaunchAtLogin(enabled)
+                    }
+                ))
 
-            Picker("기본 표시 방식", selection: Binding(
-                get: { store.settings.defaultDisplayMode },
-                set: { mode in store.update { $0.defaultDisplayMode = mode } }
-            )) {
-                ForEach(DisplayMode.enabledCases) { mode in
-                    Text(mode.title).tag(mode)
-                }
-            }
+                Toggle("Auto-hide again", isOn: Binding(
+                    get: { store.settings.autoHideEnabled },
+                    set: { enabled in store.update { $0.autoHideEnabled = enabled } }
+                ))
 
-            Toggle("자동 재숨김", isOn: Binding(
-                get: { store.settings.autoHideEnabled },
-                set: { enabled in store.update { $0.autoHideEnabled = enabled } }
-            ))
-
-            HStack {
-                Text("자동 재숨김 시간")
-                Slider(value: Binding(
-                    get: { store.settings.autoHideDelaySeconds },
+                Picker("Auto-hide delay", selection: Binding(
+                    get: { normalizedAutoHideDelay },
                     set: { value in store.update { $0.autoHideDelaySeconds = value } }
-                ), in: 1...30, step: 1)
-                Text("\(Int(store.settings.autoHideDelaySeconds))초")
-                    .frame(width: 44, alignment: .trailing)
-            }
-        }
-        .formStyle(.grouped)
-    }
-
-    private var displayTab: some View {
-        Form {
-            Button("현재 테이프 기준으로 다시 숨기기") {
-                actions.refreshHiddenRange()
-            }
-
-            HStack {
-                Button("숨긴 아이콘 보기") {
-                    actions.showHiddenIcons()
-                }
-                Button("다시 숨기기") {
-                    actions.hideHiddenIcons()
-                }
-            }
-        }
-        .formStyle(.grouped)
-    }
-
-    private var monitorTab: some View {
-        Form {
-            ForEach(Array(store.settings.displayPolicies.values).sorted(by: { $0.displayName < $1.displayName })) { policy in
-                Picker(policy.displayName, selection: Binding(
-                    get: { policy.mode },
-                set: { mode in store.setPolicy(displayId: policy.displayId, mode: mode) }
-            )) {
-                    ForEach(DisplayMode.enabledCases) { mode in
-                        Text(mode.title).tag(mode)
+                )) {
+                    ForEach(autoHideDelayOptions, id: \.self) { seconds in
+                        Text("\(Int(seconds))s").tag(seconds)
                     }
                 }
             }
 
-            Button("모니터 목록 새로고침") {
-                store.refreshDisplays()
+            Section("Box Icon") {
+                Toggle("Show Box UI", isOn: Binding(
+                    get: { store.settings.boxUIEnabled },
+                    set: { enabled in store.update { $0.boxUIEnabled = enabled } }
+                ))
+
+                Picker("Left click", selection: boxIconActionBinding(
+                    \.boxIconLeftClickAction,
+                    fallback: .toggleHiddenIcons
+                )) {
+                    ForEach(BoxIconAction.clickActionCases) { action in
+                        Text(action.title).tag(action)
+                    }
+                }
+
+                Picker("Right click", selection: boxIconActionBinding(
+                    \.boxIconRightClickAction,
+                    fallback: .showBoxUI
+                )) {
+                    ForEach(BoxIconAction.clickActionCases) { action in
+                        Text(action.title).tag(action)
+                    }
+                }
+            }
+
+            Section("Shortcuts") {
+                shortcutRow(
+                    "Menu bar icon",
+                    target: .menuBarIcon,
+                    shortcut: store.settings.menuBarIconShortcut
+                )
+                shortcutRow(
+                    "Box UI",
+                    target: .boxUI,
+                    shortcut: store.settings.boxUIShortcut
+                )
+            }
+
+            Section("Reset") {
+                Button("Reset to Defaults", role: .destructive) {
+                    isShowingResetConfirmation = true
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .alert("Reset Settings?", isPresented: $isShowingResetConfirmation) {
+            Button("Cancel", role: .cancel) {}
+            Button("Reset", role: .destructive) {
+                resetSettingsToDefaults()
+            }
+        } message: {
+            Text("This will restore all settings to their default values.")
+        }
+    }
+
+    private var normalizedAutoHideDelay: Double {
+        autoHideDelayOptions.min {
+            abs($0 - store.settings.autoHideDelaySeconds) < abs($1 - store.settings.autoHideDelaySeconds)
+        } ?? 5
+    }
+
+    private func boxIconActionBinding(
+        _ keyPath: WritableKeyPath<AppSettings, BoxIconAction>,
+        fallback: BoxIconAction
+    ) -> Binding<BoxIconAction> {
+        Binding(
+            get: {
+                let action = store.settings[keyPath: keyPath]
+                return BoxIconAction.clickActionCases.contains(action) ? action : fallback
+            },
+            set: { action in
+                store.update { $0[keyPath: keyPath] = action }
+            }
+        )
+    }
+
+    private func shortcutRow(
+        _ title: String,
+        target: ShortcutRecordingTarget,
+        shortcut: KeyboardShortcutSetting
+    ) -> some View {
+        let isRecording = shortcutRecordingTarget == target
+
+        return HStack {
+            Text(title)
+            Spacer()
+            Text(isRecording ? "Press shortcut" : shortcut.displayTitle)
+                .foregroundStyle(isRecording ? Color.accentColor : Color.secondary)
+                .monospaced()
+                .frame(width: 96, alignment: .trailing)
+            Button(isRecording ? "Cancel" : "Change") {
+                if isRecording {
+                    stopShortcutCapture()
+                } else {
+                    startShortcutCapture(target)
+                }
+            }
+            .frame(width: 64)
+        }
+    }
+
+    private func startShortcutCapture(_ target: ShortcutRecordingTarget) {
+        stopShortcutCapture()
+        shortcutRecordingTarget = target
+        actions.setShortcutRecordingActive(true)
+
+        shortcutMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            if event.keyCode == 53 {
+                stopShortcutCapture()
+                return nil
+            }
+
+            guard let shortcut = KeyboardShortcutSetting.from(event: event) else {
+                NSSound.beep()
+                return nil
+            }
+
+            store.update { settings in
+                switch target {
+                case .menuBarIcon:
+                    settings.menuBarIconShortcut = shortcut
+                case .boxUI:
+                    settings.boxUIShortcut = shortcut
+                }
+            }
+            stopShortcutCapture()
+            return nil
+        }
+    }
+
+    private func stopShortcutCapture() {
+        if let shortcutMonitor {
+            NSEvent.removeMonitor(shortcutMonitor)
+            self.shortcutMonitor = nil
+        }
+        if shortcutRecordingTarget != nil {
+            shortcutRecordingTarget = nil
+            actions.setShortcutRecordingActive(false)
+        }
+    }
+
+    private func resetSettingsToDefaults() {
+        stopShortcutCapture()
+        store.resetToDefaults()
+        actions.setLaunchAtLogin(AppSettings.defaults.launchAtLogin)
+    }
+
+    private var displayTab: some View {
+        Form {
+            Section("Box Icons") {
+                HStack(alignment: .center) {
+                    Text("Icons per row")
+                    Spacer()
+                    Text("\(store.settings.boxMaxColumns)")
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                        .frame(width: 44, alignment: .trailing)
+                    Stepper("Icons per row", value: Binding(
+                        get: { store.settings.boxMaxColumns },
+                        set: { value in
+                            store.update { $0.boxMaxColumns = max(1, min(20, value)) }
+                        }
+                    ), in: 1...20)
+                    .labelsHidden()
+                }
+            }
+
+            Section("Menu Bar Icons") {
+                HStack {
+                    Button("Show hidden icons") {
+                        actions.showHiddenIcons()
+                    }
+                    Button("Hide again") {
+                        actions.hideHiddenIcons()
+                    }
+                }
             }
         }
         .formStyle(.grouped)
@@ -138,10 +281,10 @@ struct SettingsView: View {
     private var permissionTab: some View {
         VStack(alignment: .leading, spacing: 14) {
             PermissionRow(
-                title: "손쉬운 사용",
-                description: "박스 UI에서 보이지 않는 상태 아이콘을 찾고 해당 아이콘의 메뉴를 열 때 필요합니다.",
+                title: "Accessibility",
+                description: "Required to find hidden status icons and open their menus from Box UI.",
                 granted: ClickForwarder.accessibilityTrusted,
-                actionTitle: "권한 요청",
+                actionTitle: "Request Access",
                 action: actions.requestAccessibility
             )
 

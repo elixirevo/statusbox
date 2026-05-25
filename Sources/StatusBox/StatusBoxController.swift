@@ -1,4 +1,6 @@
 import AppKit
+import Carbon
+import Combine
 import CoreGraphics
 
 private enum StatusItemLength {
@@ -14,6 +16,40 @@ private enum HiddenBoxLayout {
     static let clickForwardMaxAttempts = 12
 }
 
+private enum StatusBoxHotKey {
+    static let signature: OSType = 0x53544258
+    static let menuBarIconID: UInt32 = 1
+    static let boxUIID: UInt32 = 2
+}
+
+private func statusBoxHotKeyHandler(
+    _ nextHandler: EventHandlerCallRef?,
+    _ eventRef: EventRef?,
+    _ userData: UnsafeMutableRawPointer?
+) -> OSStatus {
+    guard let eventRef, let userData else { return noErr }
+
+    var hotKeyID = EventHotKeyID()
+    let status = GetEventParameter(
+        eventRef,
+        EventParamName(kEventParamDirectObject),
+        EventParamType(typeEventHotKeyID),
+        nil,
+        MemoryLayout<EventHotKeyID>.size,
+        nil,
+        &hotKeyID
+    )
+    guard status == noErr, hotKeyID.signature == StatusBoxHotKey.signature else {
+        return status
+    }
+
+    let controller = Unmanaged<StatusBoxController>.fromOpaque(userData).takeUnretainedValue()
+    DispatchQueue.main.async {
+        controller.handleKeyboardShortcut(id: hotKeyID.id)
+    }
+    return noErr
+}
+
 final class StatusBoxController: NSObject {
     private let store = SettingsStore()
     private lazy var overlayManager = OverlayManager(store: store)
@@ -26,6 +62,19 @@ final class StatusBoxController: NSObject {
     private var autoHideTimer: Timer?
     private var captureTask: Task<Void, Never>?
     private var isHidden = false
+    private var settingsCancellable: AnyCancellable?
+    private var hotKeyEventHandler: EventHandlerRef?
+    private var menuBarIconHotKey: EventHotKeyRef?
+    private var boxUIHotKey: EventHotKeyRef?
+    private var isRecordingShortcut = false
+    private var proxyTargetScanTask: Task<Void, Never>?
+    private var cachedProxyTargets: [MenuBarProxyTarget] = []
+    private var cachedProxyTargetsLoadedAt: Date?
+
+    deinit {
+        proxyTargetScanTask?.cancel()
+        uninstallKeyboardShortcuts()
+    }
 
     func start() {
         boxWindowController.onForwardedClick = { [weak self] click, button in
@@ -34,9 +83,21 @@ final class StatusBoxController: NSObject {
 
         configureMainStatusItem()
         configureTapeStatusItem()
+        installKeyboardShortcuts()
+
+        settingsCancellable = store.$settings
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.refreshKeyboardShortcuts()
+            }
 
         DispatchQueue.main.async { [weak self] in
             self?.hideHiddenIcons()
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            self?.refreshProxyTargetCache(updateVisibleBox: false)
         }
 
         DistributedNotificationCenter.default().addObserver(
@@ -61,7 +122,7 @@ final class StatusBoxController: NSObject {
         if let button = item.button {
             button.image = StatusIconFactory.boxIcon()
             button.title = ""
-            button.toolTip = "Status Box: 숨김/보임 전환"
+            button.toolTip = "Status Box"
             button.target = self
             button.action = #selector(statusItemClicked(_:))
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
@@ -77,25 +138,36 @@ final class StatusBoxController: NSObject {
             button.image = StatusIconFactory.tapeIcon()
             button.title = ""
             button.imagePosition = .imageOnly
-            button.toolTip = "Status Box 기준선: Command-드래그로 숨길 아이콘들의 오른쪽에 놓으세요."
-            button.target = nil
-            button.action = nil
+            button.toolTip = "Status Box marker: Command-drag to move, right-click to open menu"
+            button.target = self
+            button.action = #selector(tapeItemClicked(_:))
+            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
         tapeItem = item
     }
 
     @objc private func statusItemClicked(_ sender: NSStatusBarButton) {
         guard let event = NSApp.currentEvent else {
-            toggleHiddenIcons()
+            performBoxIconAction(store.settings.boxIconLeftClickAction)
+            return
+        }
+
+        if event.type == .rightMouseUp || event.modifierFlags.contains(.control) {
+            performBoxIconAction(store.settings.boxIconRightClickAction)
+        } else if event.modifierFlags.contains(.option) {
+            performBoxIconAction(.showBoxUI)
+        } else {
+            performBoxIconAction(store.settings.boxIconLeftClickAction)
+        }
+    }
+
+    @objc private func tapeItemClicked(_ sender: NSStatusBarButton) {
+        guard let event = NSApp.currentEvent else {
             return
         }
 
         if event.type == .rightMouseUp || event.modifierFlags.contains(.control) {
             showContextMenu(from: sender)
-        } else if event.modifierFlags.contains(.option) {
-            showHiddenIconsBox()
-        } else {
-            toggleHiddenIcons()
         }
     }
 
@@ -104,6 +176,42 @@ final class StatusBoxController: NSObject {
             showHiddenIcons()
         } else {
             hideHiddenIcons()
+        }
+    }
+
+    private func performBoxIconAction(_ action: BoxIconAction) {
+        switch action {
+        case .toggleHiddenIcons:
+            toggleHiddenIcons()
+        case .showBoxUI:
+            showHiddenIconsBox()
+        case .showHiddenIcons:
+            showHiddenIcons()
+        case .hideHiddenIcons:
+            hideHiddenIcons()
+        case .openSettings:
+            openSettings()
+        case .none:
+            break
+        }
+    }
+
+    fileprivate func handleKeyboardShortcut(id: UInt32) {
+        switch id {
+        case StatusBoxHotKey.menuBarIconID:
+            toggleHiddenIcons()
+        case StatusBoxHotKey.boxUIID:
+            toggleHiddenIconsBox()
+        default:
+            break
+        }
+    }
+
+    private func toggleHiddenIconsBox() {
+        if boxWindowController.isShowing {
+            boxWindowController.close()
+        } else {
+            showHiddenIconsBox()
         }
     }
 
@@ -152,16 +260,123 @@ final class StatusBoxController: NSObject {
         RunLoop.main.add(timer, forMode: .common)
     }
 
+    private func installKeyboardShortcuts() {
+        guard hotKeyEventHandler == nil else {
+            refreshKeyboardShortcuts()
+            return
+        }
+
+        var eventType = EventTypeSpec(
+            eventClass: OSType(kEventClassKeyboard),
+            eventKind: UInt32(kEventHotKeyPressed)
+        )
+        let status = InstallEventHandler(
+            GetApplicationEventTarget(),
+            statusBoxHotKeyHandler,
+            1,
+            &eventType,
+            Unmanaged.passUnretained(self).toOpaque(),
+            &hotKeyEventHandler
+        )
+        if status != noErr {
+            NSLog("[StatusBox] Failed to install hotkey handler: %d", status)
+        }
+        refreshKeyboardShortcuts()
+    }
+
+    private func refreshKeyboardShortcuts() {
+        unregisterKeyboardShortcuts()
+        guard hotKeyEventHandler != nil, !isRecordingShortcut else { return }
+
+        let menuBarShortcut = store.settings.menuBarIconShortcut
+        let boxUIShortcut = store.settings.boxUIShortcut
+
+        menuBarIconHotKey = registerKeyboardShortcut(
+            menuBarShortcut,
+            id: StatusBoxHotKey.menuBarIconID
+        )
+
+        if boxUIShortcut == menuBarShortcut {
+            NSLog("[StatusBox] Box UI shortcut matches menu bar shortcut; skipping duplicate registration")
+        } else {
+            boxUIHotKey = registerKeyboardShortcut(
+                boxUIShortcut,
+                id: StatusBoxHotKey.boxUIID
+            )
+        }
+    }
+
+    private func setShortcutRecordingActive(_ active: Bool) {
+        isRecordingShortcut = active
+        if active {
+            unregisterKeyboardShortcuts()
+        } else {
+            refreshKeyboardShortcuts()
+        }
+    }
+
+    private func registerKeyboardShortcut(
+        _ shortcut: KeyboardShortcutSetting,
+        id: UInt32
+    ) -> EventHotKeyRef? {
+        var hotKeyRef: EventHotKeyRef?
+        let hotKeyID = EventHotKeyID(signature: StatusBoxHotKey.signature, id: id)
+        let status = RegisterEventHotKey(
+            shortcut.keyCode,
+            carbonModifierFlags(for: shortcut.modifiers),
+            hotKeyID,
+            GetApplicationEventTarget(),
+            0,
+            &hotKeyRef
+        )
+        if status != noErr {
+            NSLog("[StatusBox] Failed to register shortcut %@: %d", shortcut.displayTitle, status)
+            return nil
+        }
+        return hotKeyRef
+    }
+
+    private func unregisterKeyboardShortcuts() {
+        if let hotKey = menuBarIconHotKey {
+            UnregisterEventHotKey(hotKey)
+            menuBarIconHotKey = nil
+        }
+        if let hotKey = boxUIHotKey {
+            UnregisterEventHotKey(hotKey)
+            boxUIHotKey = nil
+        }
+    }
+
+    private func uninstallKeyboardShortcuts() {
+        unregisterKeyboardShortcuts()
+        if let handler = hotKeyEventHandler {
+            RemoveEventHandler(handler)
+            hotKeyEventHandler = nil
+        }
+    }
+
+    private func carbonModifierFlags(for modifiers: ShortcutModifiers) -> UInt32 {
+        var flags: UInt32 = 0
+        if modifiers.contains(.command) {
+            flags |= UInt32(cmdKey)
+        }
+        if modifiers.contains(.option) {
+            flags |= UInt32(optionKey)
+        }
+        if modifiers.contains(.control) {
+            flags |= UInt32(controlKey)
+        }
+        if modifiers.contains(.shift) {
+            flags |= UInt32(shiftKey)
+        }
+        return flags
+    }
+
     private func showContextMenu(from button: NSStatusBarButton) {
         let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "숨긴 아이콘 보기", action: #selector(showHiddenIconsMenuAction), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "다시 숨기기", action: #selector(hideHiddenIconsMenuAction), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "박스에서 보기", action: #selector(showHiddenIconsBoxMenuAction), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "현재 테이프 위치로 다시 숨기기", action: #selector(refreshRangeMenuAction), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Open Settings", action: #selector(openSettingsMenuAction), keyEquivalent: ","))
         menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "설정 열기", action: #selector(openSettingsMenuAction), keyEquivalent: ","))
-        menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "Status Box 종료", action: #selector(quitMenuAction), keyEquivalent: "q"))
+        menu.addItem(NSMenuItem(title: "Quit Status Box", action: #selector(quitMenuAction), keyEquivalent: "q"))
 
         for item in menu.items where item.target == nil {
             item.target = self
@@ -223,6 +438,9 @@ final class StatusBoxController: NSObject {
                 hideHiddenIcons: { [weak self] in self?.hideHiddenIcons() },
                 requestAccessibility: { ClickForwarder.requestAccessibilityAccess() },
                 requestScreenRecording: { ScreenCapture.requestScreenCaptureAccess() },
+                setShortcutRecordingActive: { [weak self] active in
+                    self?.setShortcutRecordingActive(active)
+                },
                 setLaunchAtLogin: { enabled in LaunchAtLoginManager.setEnabled(enabled) }
             )
             settingsWindowController = SettingsWindowController(store: store, actions: actions)
@@ -231,6 +449,10 @@ final class StatusBoxController: NSObject {
     }
 
     private func showHiddenIconsBox() {
+        guard store.settings.boxUIEnabled else {
+            return
+        }
+
         guard ClickForwarder.accessibilityTrusted else {
             ClickForwarder.requestAccessibilityAccess()
             return
@@ -246,18 +468,87 @@ final class StatusBoxController: NSObject {
         autoHideTimer = nil
         captureTask?.cancel()
 
-        let proxyTargets = MenuBarProxyScanner.targetsBeforeMarker(
-            tapeFrame: tapeFrame,
-            excludingProcessIdentifier: ProcessInfo.processInfo.processIdentifier
-        )
-        NSLog("[StatusBox] Loaded %ld proxy targets before tape frame %@", proxyTargets.count, NSStringFromRect(tapeFrame))
-
+        let cachedTargets = cachedProxyTargets(before: tapeFrame)
+        let hasLoadedCache = cachedProxyTargetsLoadedAt != nil
         boxWindowController.showProxyTargets(
             anchorFrame: anchorFrame,
             screen: screen,
-            proxyTargets: proxyTargets
+            proxyTargets: cachedTargets,
+            statusText: hasLoadedCache ? nil : "Loading"
         )
         scheduleAutoHideIfNeeded()
+        refreshProxyTargetCache(
+            anchorFrame: anchorFrame,
+            tapeFrame: tapeFrame,
+            updateVisibleBox: !hasLoadedCache || cachedTargets.isEmpty
+        )
+    }
+
+    private func refreshProxyTargetCache(
+        anchorFrame: NSRect? = nil,
+        tapeFrame: NSRect? = nil,
+        updateVisibleBox: Bool
+    ) {
+        guard ClickForwarder.accessibilityTrusted else {
+            return
+        }
+
+        let resolvedAnchorFrame = anchorFrame ?? statusItem?.button?.window?.frame
+        guard let resolvedTapeFrame = tapeFrame ?? tapeItem?.button?.window?.frame else {
+            return
+        }
+
+        proxyTargetScanTask?.cancel()
+        let excludedPID = ProcessInfo.processInfo.processIdentifier
+        let runningApplications = MenuBarProxyScanner.runningApplicationInfo(
+            excludingProcessIdentifier: excludedPID
+        )
+        let startedAt = Date()
+
+        proxyTargetScanTask = Task { [weak self] in
+            let targets = await Task.detached(priority: updateVisibleBox ? .userInitiated : .utility) {
+                MenuBarProxyScanner.targetsBeforeMarker(
+                    tapeFrame: resolvedTapeFrame,
+                    runningApplications: runningApplications
+                )
+            }.value
+
+            guard !Task.isCancelled else { return }
+
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+
+                self.cachedProxyTargets = targets
+                self.cachedProxyTargetsLoadedAt = Date()
+                NSLog(
+                    "[StatusBox] Proxy target cache refreshed %ld targets in %.1fms",
+                    targets.count,
+                    Date().timeIntervalSince(startedAt) * 1000
+                )
+
+                guard updateVisibleBox,
+                      self.boxWindowController.isShowing,
+                      let resolvedAnchorFrame,
+                      let resolvedScreen = MenuBarGeometry.screen(
+                        containing: NSPoint(x: resolvedAnchorFrame.midX, y: resolvedAnchorFrame.midY)
+                      ) else {
+                    return
+                }
+
+                self.boxWindowController.showProxyTargets(
+                    anchorFrame: resolvedAnchorFrame,
+                    screen: resolvedScreen,
+                    proxyTargets: self.cachedProxyTargets(before: resolvedTapeFrame)
+                )
+                self.scheduleAutoHideIfNeeded()
+            }
+        }
+    }
+
+    private func cachedProxyTargets(before tapeFrame: NSRect) -> [MenuBarProxyTarget] {
+        cachedProxyTargets
+            .filter { $0.appKitFrame.maxX <= tapeFrame.minX + 1 }
+            .sorted { $0.appKitFrame.minX < $1.appKitFrame.minX }
     }
 
     private func hiddenIconsCaptureRect(tapeFrame: NSRect, screen: NSScreen) -> NSRect {
@@ -278,7 +569,7 @@ final class StatusBoxController: NSObject {
 
         if !click.revealBeforeForwarding {
             guard let target = click.target else {
-                boxWindowController.showStatus("Failed: 타겟 없음")
+                boxWindowController.showStatus("Failed: No target")
                 return
             }
 
@@ -292,17 +583,8 @@ final class StatusBoxController: NSObject {
                 return
             }
 
-            let result = ClickForwarder.performHiddenStatusItemAccessibilityAction(
-                on: liveTarget,
-                button: button
-            )
-            if result.didForward {
-                boxWindowController.showStatus("앱 UI 열림: \(liveTarget.displayName)")
-                scheduleAutoHideIfNeeded(minimumDelay: 10)
-            } else {
-                boxWindowController.showStatus("지원하지 않는 앱: \(liveTarget.displayName)")
-                scheduleAutoHideIfNeeded(minimumDelay: 15)
-            }
+            boxWindowController.showStatus("Unsupported app: \(liveTarget.displayName)")
+            scheduleAutoHideIfNeeded(minimumDelay: 15)
             return
         }
 
@@ -335,7 +617,7 @@ final class StatusBoxController: NSObject {
                 let point = targetForClick?.appKitClickPoint ?? click.appKitPoint
                 guard self.isVisibleMenuBarPoint(point) else {
                     NSLog("[StatusBox] Proxy click target is not visible after reveal point=%@", NSStringFromPoint(point))
-                    self.boxWindowController.showStatus("Failed: 타겟 찾기 실패")
+                    self.boxWindowController.showStatus("Failed: Target not found")
                     return ClickForwarder.ForwardResult.failed
                 }
 
@@ -346,7 +628,7 @@ final class StatusBoxController: NSObject {
                 }
 
                 let result = ClickForwarder.postClick(at: point, button: button, target: targetForClick)
-                let targetName = targetForClick?.displayName ?? "좌표"
+                let targetName = targetForClick?.displayName ?? "Point"
                 self.boxWindowController.showStatus("\(result.title): \(targetName)")
                 return result
             }

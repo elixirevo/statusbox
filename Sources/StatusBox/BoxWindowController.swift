@@ -11,6 +11,7 @@ private enum BoxLayout {
     static let gridGap: CGFloat = 8
     static let iconRowExtraHeight: CGFloat = 6
     static let statusReserveHeight: CGFloat = 24
+    static let defaultMaxGridColumns = 10
 }
 
 private enum GlassBoxStyle {
@@ -32,6 +33,10 @@ final class BoxWindowController {
 
     init(settingsStore: SettingsStore) {
         self.settingsStore = settingsStore
+    }
+
+    var isShowing: Bool {
+        panel?.isVisible == true
     }
 
     func show(
@@ -92,7 +97,12 @@ final class BoxWindowController {
         installDismissMonitors(panel: panel)
     }
 
-    func showProxyTargets(anchorFrame: NSRect, screen: NSScreen, proxyTargets: [MenuBarProxyTarget]) {
+    func showProxyTargets(
+        anchorFrame: NSRect,
+        screen: NSScreen,
+        proxyTargets: [MenuBarProxyTarget],
+        statusText: String? = nil
+    ) {
         close()
 
         let padding = BoxLayout.gridPadding
@@ -100,10 +110,13 @@ final class BoxWindowController {
         let gap = BoxLayout.gridGap
         let maxWidth = screen.visibleFrame.width - 24
         let maxColumns = max(1, Int((maxWidth - padding * 2 + gap) / (iconSize + gap)))
-        let columns = max(1, min(maxColumns, max(1, proxyTargets.count)))
+        let maxGridColumns = max(1, settingsStore.settings.boxMaxColumns)
+        let columns = max(1, min(maxColumns, maxGridColumns, max(1, proxyTargets.count)))
         let rows = max(1, Int(ceil(Double(max(1, proxyTargets.count)) / Double(columns))))
         let rowHeight = iconSize + BoxLayout.iconRowExtraHeight
-        let width = min(maxWidth, max(180, padding * 2 + CGFloat(columns) * iconSize + CGFloat(max(0, columns - 1)) * gap))
+        let minimumGridWidth = padding * 2 + iconSize
+        let fittedGridWidth = padding * 2 + CGFloat(columns) * iconSize + CGFloat(max(0, columns - 1)) * gap
+        let width = min(maxWidth, max(minimumGridWidth, fittedGridWidth))
         let height = min(
             screen.visibleFrame.height - 24,
             max(54, padding * 2 + CGFloat(rows) * rowHeight + BoxLayout.statusReserveHeight)
@@ -128,9 +141,10 @@ final class BoxWindowController {
         let content = IconStripView(frame: NSRect(origin: .zero, size: frame.size))
         content.usesTargetGrid = true
         content.iconSize = iconSize
+        content.maxGridColumns = maxGridColumns
         content.rangeRect = .zero
         content.proxyTargets = proxyTargets
-        content.statusText = initialStatusText(proxyTargets: proxyTargets)
+        content.statusText = statusText ?? initialStatusText(proxyTargets: proxyTargets)
         content.onClick = { [weak self] (click: MenuBarProxyClick, button: CGMouseButton) in
             self?.prepareForForwardedClick(click)
             self?.onForwardedClick?(click, button)
@@ -288,12 +302,12 @@ final class BoxWindowController {
 
     private func initialStatusText(proxyTargets: [MenuBarProxyTarget]) -> String? {
         if !ClickForwarder.accessibilityTrusted {
-            return "손쉬운 사용 권한 필요"
+            return "Accessibility access required"
         }
         if proxyTargets.isEmpty {
-            return "타겟 없음"
+            return "No targets"
         }
-        return "타겟 \(proxyTargets.count)개"
+        return nil
     }
 
     private func proxyMenuPoint(anchorPoint: NSPoint?, in view: NSView, panel: NSPanel) -> NSPoint {
@@ -429,8 +443,9 @@ final class IconStripView: NSView {
     var image: CGImage?
     var usesTargetGrid = false
     var iconSize: CGFloat = 22
+    var maxGridColumns: Int = BoxLayout.defaultMaxGridColumns
     var sourcePointSize: NSSize = .zero
-    var placeholderText = "메뉴 막대 이미지를 가져올 수 없습니다"
+    var placeholderText = "Unable to capture the menu bar image."
     var rangeRect: NSRect = .zero
     var proxyTargets: [MenuBarProxyTarget] = []
     var onClick: ((MenuBarProxyClick, CGMouseButton) -> Void)?
@@ -756,7 +771,8 @@ final class IconStripView: NSView {
         let padding = BoxLayout.gridPadding
         let gap = BoxLayout.gridGap
         let rowHeight = iconSize + BoxLayout.iconRowExtraHeight
-        let columns = max(1, Int((bounds.width - padding * 2 + gap) / (iconSize + gap)))
+        let availableColumns = max(1, Int((bounds.width - padding * 2 + gap) / (iconSize + gap)))
+        let columns = min(availableColumns, max(1, maxGridColumns))
 
         return proxyTargets.enumerated().map { index, target in
             let row = index / columns
