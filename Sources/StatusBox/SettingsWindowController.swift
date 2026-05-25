@@ -36,6 +36,8 @@ struct SettingsActions {
     var refreshHiddenRange: () -> Void
     var showHiddenIcons: () -> Void
     var hideHiddenIcons: () -> Void
+    var requestAccessibility: () -> Void
+    var requestScreenRecording: () -> Void
     var setLaunchAtLogin: (Bool) -> Void
 }
 
@@ -51,6 +53,8 @@ struct SettingsView: View {
                 .tabItem { Label("표시", systemImage: "menubar.rectangle") }
             monitorTab
                 .tabItem { Label("모니터", systemImage: "display.2") }
+            permissionTab
+                .tabItem { Label("권한", systemImage: "lock.shield") }
         }
         .padding(20)
         .frame(minWidth: 560, minHeight: 460)
@@ -129,6 +133,21 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
+    }
+
+    private var permissionTab: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            PermissionRow(
+                title: "손쉬운 사용",
+                description: "박스 UI에서 보이지 않는 상태 아이콘을 찾고 해당 아이콘의 메뉴를 열 때 필요합니다.",
+                granted: ClickForwarder.accessibilityTrusted,
+                actionTitle: "권한 요청",
+                action: actions.requestAccessibility
+            )
+
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

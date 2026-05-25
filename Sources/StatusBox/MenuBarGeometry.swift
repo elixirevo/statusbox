@@ -66,8 +66,47 @@ enum MenuBarGeometry {
         return result
     }
 
+    static var desktopTop: CGFloat {
+        NSScreen.screens.map(\.frame.maxY).max() ?? NSScreen.main?.frame.maxY ?? 0
+    }
+
     static func quartzPoint(fromAppKitPoint point: NSPoint) -> CGPoint {
-        let top = NSScreen.screens.map(\.frame.maxY).max() ?? NSScreen.main?.frame.maxY ?? point.y
+        if let screen = screen(containing: point),
+           let displayBounds = cgDisplayBounds(for: screen) {
+            return CGPoint(
+                x: displayBounds.minX + (point.x - screen.frame.minX),
+                y: displayBounds.minY + (screen.frame.maxY - point.y)
+            )
+        }
+
+        let top = desktopTop == 0 ? point.y : desktopTop
         return CGPoint(x: point.x, y: top - point.y)
+    }
+
+    static func appKitPoint(fromQuartzPoint point: CGPoint) -> NSPoint {
+        if let screen = screen(containingQuartzPoint: point),
+           let displayBounds = cgDisplayBounds(for: screen) {
+            return NSPoint(
+                x: screen.frame.minX + (point.x - displayBounds.minX),
+                y: screen.frame.maxY - (point.y - displayBounds.minY)
+            )
+        }
+
+        let top = desktopTop == 0 ? point.y : desktopTop
+        return NSPoint(x: point.x, y: top - point.y)
+    }
+
+    private static func screen(containingQuartzPoint point: CGPoint) -> NSScreen? {
+        NSScreen.screens.first { screen in
+            guard let bounds = cgDisplayBounds(for: screen) else { return false }
+            return bounds.contains(point)
+        } ?? NSScreen.main
+    }
+
+    private static func cgDisplayBounds(for screen: NSScreen) -> CGRect? {
+        guard let displayNumber = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+            return nil
+        }
+        return CGDisplayBounds(CGDirectDisplayID(displayNumber.uint32Value))
     }
 }

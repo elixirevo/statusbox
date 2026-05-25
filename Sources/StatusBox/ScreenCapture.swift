@@ -81,10 +81,10 @@ enum ScreenCapture {
     }
 
     private static func screenCaptureRect(fromAppKitRect rect: NSRect) -> CGRect {
-        let desktopTop = NSScreen.screens.map(\.frame.maxY).max() ?? rect.maxY
+        let topLeft = MenuBarGeometry.quartzPoint(fromAppKitPoint: NSPoint(x: rect.minX, y: rect.maxY))
         return CGRect(
-            x: rect.minX,
-            y: desktopTop - rect.maxY,
+            x: topLeft.x,
+            y: topLeft.y,
             width: rect.width,
             height: rect.height
         )

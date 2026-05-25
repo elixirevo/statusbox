@@ -16,5 +16,11 @@ cp ".build/$BUILD_CONFIG/$APP_NAME" "$APP_DIR/Contents/MacOS/$APP_NAME"
 cp "$ROOT_DIR/Resources/Info.plist" "$APP_DIR/Contents/Info.plist"
 
 chmod +x "$APP_DIR/Contents/MacOS/$APP_NAME"
+codesign \
+  --force \
+  --sign - \
+  --identifier "com.elixirevo.StatusBox" \
+  --requirements '=designated => identifier "com.elixirevo.StatusBox"' \
+  "$APP_DIR"
 
 echo "Built $APP_DIR"
