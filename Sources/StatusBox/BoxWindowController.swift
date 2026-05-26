@@ -87,7 +87,9 @@ final class BoxWindowController {
         content.iconSize = CGFloat(settingsStore.settings.boxIconSize)
         content.statusText = initialStatusText(proxyTargets: proxyTargets)
         content.onClick = { [weak self] (click: MenuBarProxyClick, button: CGMouseButton) in
-            self?.prepareForForwardedClick(click)
+            if button != .left {
+                self?.prepareForForwardedClick(click)
+            }
             self?.onForwardedClick?(click, button)
         }
         panel.contentView = GlassBoxContentView(frame: NSRect(origin: .zero, size: frame.size), iconStripView: content)
@@ -146,7 +148,9 @@ final class BoxWindowController {
         content.proxyTargets = proxyTargets
         content.statusText = statusText ?? initialStatusText(proxyTargets: proxyTargets)
         content.onClick = { [weak self] (click: MenuBarProxyClick, button: CGMouseButton) in
-            self?.prepareForForwardedClick(click)
+            if button != .left {
+                self?.prepareForForwardedClick(click)
+            }
             self?.onForwardedClick?(click, button)
         }
 

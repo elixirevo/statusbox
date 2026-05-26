@@ -193,16 +193,34 @@ enum MenuBarProxyScanner {
         )
     }
 
+    static func statusItemTargets(
+        runningApplications: [RunningApplicationInfo]
+    ) -> [MenuBarProxyTarget] {
+        scanStatusItemTargets(
+            runningApplications: runningApplications,
+            markerX: nil
+        )
+    }
+
     static func targetsBeforeMarker(
         tapeFrame: NSRect,
         runningApplications: [RunningApplicationInfo]
+    ) -> [MenuBarProxyTarget] {
+        scanStatusItemTargets(
+            runningApplications: runningApplications,
+            markerX: tapeFrame.minX
+        )
+    }
+
+    private static func scanStatusItemTargets(
+        runningApplications: [RunningApplicationInfo],
+        markerX: CGFloat?
     ) -> [MenuBarProxyTarget] {
         guard ClickForwarder.accessibilityTrusted else {
             return []
         }
 
         let startedAt = CFAbsoluteTimeGetCurrent()
-        let markerX = tapeFrame.minX
         var targetsByKey: [String: MenuBarProxyTarget] = [:]
         let applicationInfoByPID = Dictionary(uniqueKeysWithValues: runningApplications.map {
             ($0.processIdentifier, $0)
@@ -221,7 +239,7 @@ enum MenuBarProxyScanner {
                             clippingRect: nil,
                             applicationInfoByPID: applicationInfoByPID
                           ),
-                          target.appKitFrame.maxX <= markerX + 1 else {
+                          markerX.map({ target.appKitFrame.maxX <= $0 + 1 }) ?? true else {
                         continue
                     }
                     targetsByKey[key(for: target)] = target
@@ -231,9 +249,10 @@ enum MenuBarProxyScanner {
 
         let elapsedMilliseconds = (CFAbsoluteTimeGetCurrent() - startedAt) * 1000
         NSLog(
-            "[StatusBox] Status item scan loaded %ld targets from %ld apps in %.1fms",
+            "[StatusBox] Status item scan loaded %ld targets from %ld apps marker=%@ in %.1fms",
             targetsByKey.count,
             runningApplications.count,
+            markerX.map { String(format: "%.1f", Double($0)) } ?? "all",
             elapsedMilliseconds
         )
 

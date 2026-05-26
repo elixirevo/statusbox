@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import Carbon
 import Combine
 import CoreGraphics
@@ -16,10 +17,22 @@ private enum HiddenBoxLayout {
     static let clickForwardMaxAttempts = 12
 }
 
+private enum ProxyTargetCacheTiming {
+    static let launchWarmupDelays: [TimeInterval] = [0.35, 1, 2, 4, 8, 15]
+    static let appChangeRefreshDelays: [TimeInterval] = [0.75, 2, 5, 10, 20]
+    static let environmentRefreshDelays: [TimeInterval] = [1, 3]
+    static let periodicRefreshInterval: TimeInterval = 30
+}
+
 private enum StatusBoxHotKey {
     static let signature: OSType = 0x53544258
     static let menuBarIconID: UInt32 = 1
     static let boxUIID: UInt32 = 2
+}
+
+private struct ApplicationWindowActivationResult {
+    let hasWindows: Bool
+    let didRaiseWindow: Bool
 }
 
 private func statusBoxHotKeyHandler(
@@ -68,17 +81,24 @@ final class StatusBoxController: NSObject {
     private var boxUIHotKey: EventHotKeyRef?
     private var isRecordingShortcut = false
     private var proxyTargetScanTask: Task<Void, Never>?
+    private var proxyTargetWarmupWorkItem: DispatchWorkItem?
+    private var proxyTargetRefreshWorkItems: [DispatchWorkItem] = []
+    private var proxyTargetPeriodicRefreshTimer: Timer?
+    private var proxyTargetWarmupAttempt = 0
     private var cachedProxyTargets: [MenuBarProxyTarget] = []
     private var cachedProxyTargetsLoadedAt: Date?
 
     deinit {
         proxyTargetScanTask?.cancel()
+        proxyTargetWarmupWorkItem?.cancel()
+        proxyTargetRefreshWorkItems.forEach { $0.cancel() }
+        proxyTargetPeriodicRefreshTimer?.invalidate()
         uninstallKeyboardShortcuts()
     }
 
     func start() {
         boxWindowController.onForwardedClick = { [weak self] click, button in
-            self?.forwardClickToMenuBar(click: click, button: button)
+            self?.handleBoxIconClick(click: click, button: button)
         }
 
         configureMainStatusItem()
@@ -96,9 +116,8 @@ final class StatusBoxController: NSObject {
             self?.hideHiddenIcons()
         }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
-            self?.refreshProxyTargetCache(updateVisibleBox: false)
-        }
+        startProxyTargetCacheWarmup()
+        startProxyTargetPeriodicRefresh()
 
         DistributedNotificationCenter.default().addObserver(
             self,
@@ -111,6 +130,20 @@ final class StatusBoxController: NSObject {
             self,
             selector: #selector(activeSpaceChanged),
             name: NSWorkspace.activeSpaceDidChangeNotification,
+            object: nil
+        )
+
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(runningApplicationsChanged),
+            name: NSWorkspace.didLaunchApplicationNotification,
+            object: nil
+        )
+
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(runningApplicationTerminated(_:)),
+            name: NSWorkspace.didTerminateApplicationNotification,
             object: nil
         )
     }
@@ -480,23 +513,79 @@ final class StatusBoxController: NSObject {
         refreshProxyTargetCache(
             anchorFrame: anchorFrame,
             tapeFrame: tapeFrame,
-            updateVisibleBox: !hasLoadedCache || cachedTargets.isEmpty
+            updateVisibleBox: !hasLoadedCache || cachedTargets.isEmpty,
+            retryWarmupIfEmpty: true
         )
+    }
+
+    private func startProxyTargetCacheWarmup() {
+        proxyTargetWarmupWorkItem?.cancel()
+        proxyTargetWarmupAttempt = 0
+        scheduleProxyTargetCacheWarmupAttempt()
+    }
+
+    private func startProxyTargetPeriodicRefresh() {
+        proxyTargetPeriodicRefreshTimer?.invalidate()
+        let timer = Timer(timeInterval: ProxyTargetCacheTiming.periodicRefreshInterval, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            self.refreshProxyTargetCache(
+                updateVisibleBox: self.boxWindowController.isShowing,
+                retryWarmupIfEmpty: true
+            )
+        }
+        timer.tolerance = 5
+        proxyTargetPeriodicRefreshTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func scheduleProxyTargetCacheWarmupAttempt() {
+        proxyTargetWarmupWorkItem?.cancel()
+        guard cachedProxyTargets.isEmpty,
+              proxyTargetWarmupAttempt < ProxyTargetCacheTiming.launchWarmupDelays.count else {
+            return
+        }
+
+        let delay = ProxyTargetCacheTiming.launchWarmupDelays[proxyTargetWarmupAttempt]
+        proxyTargetWarmupAttempt += 1
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self, self.cachedProxyTargets.isEmpty else { return }
+            self.refreshProxyTargetCache(
+                updateVisibleBox: false,
+                retryWarmupIfEmpty: true
+            )
+        }
+        proxyTargetWarmupWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+    }
+
+    private func scheduleProxyTargetCacheRefreshes(delays: [TimeInterval]) {
+        proxyTargetRefreshWorkItems.forEach { $0.cancel() }
+        proxyTargetRefreshWorkItems = delays.map { delay in
+            let workItem = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                self.refreshProxyTargetCache(
+                    updateVisibleBox: self.boxWindowController.isShowing,
+                    retryWarmupIfEmpty: true
+                )
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+            return workItem
+        }
     }
 
     private func refreshProxyTargetCache(
         anchorFrame: NSRect? = nil,
         tapeFrame: NSRect? = nil,
-        updateVisibleBox: Bool
+        updateVisibleBox: Bool,
+        retryWarmupIfEmpty: Bool = false
     ) {
         guard ClickForwarder.accessibilityTrusted else {
             return
         }
 
         let resolvedAnchorFrame = anchorFrame ?? statusItem?.button?.window?.frame
-        guard let resolvedTapeFrame = tapeFrame ?? tapeItem?.button?.window?.frame else {
-            return
-        }
+        let resolvedTapeFrame = tapeFrame ?? tapeItem?.button?.window?.frame
 
         proxyTargetScanTask?.cancel()
         let excludedPID = ProcessInfo.processInfo.processIdentifier
@@ -507,8 +596,7 @@ final class StatusBoxController: NSObject {
 
         proxyTargetScanTask = Task { [weak self] in
             let targets = await Task.detached(priority: updateVisibleBox ? .userInitiated : .utility) {
-                MenuBarProxyScanner.targetsBeforeMarker(
-                    tapeFrame: resolvedTapeFrame,
+                MenuBarProxyScanner.statusItemTargets(
                     runningApplications: runningApplications
                 )
             }.value
@@ -518,17 +606,28 @@ final class StatusBoxController: NSObject {
             await MainActor.run { [weak self] in
                 guard let self else { return }
 
-                self.cachedProxyTargets = targets
-                self.cachedProxyTargetsLoadedAt = Date()
+                if !targets.isEmpty || updateVisibleBox {
+                    self.cachedProxyTargets = targets
+                    self.cachedProxyTargetsLoadedAt = Date()
+                }
                 NSLog(
                     "[StatusBox] Proxy target cache refreshed %ld targets in %.1fms",
                     targets.count,
                     Date().timeIntervalSince(startedAt) * 1000
                 )
 
+                if retryWarmupIfEmpty {
+                    if targets.isEmpty {
+                        self.scheduleProxyTargetCacheWarmupAttempt()
+                    } else {
+                        self.proxyTargetWarmupWorkItem?.cancel()
+                    }
+                }
+
                 guard updateVisibleBox,
                       self.boxWindowController.isShowing,
                       let resolvedAnchorFrame,
+                      let resolvedTapeFrame,
                       let resolvedScreen = MenuBarGeometry.screen(
                         containing: NSPoint(x: resolvedAnchorFrame.midX, y: resolvedAnchorFrame.midY)
                       ) else {
@@ -551,11 +650,80 @@ final class StatusBoxController: NSObject {
             .sorted { $0.appKitFrame.minX < $1.appKitFrame.minX }
     }
 
+    private func removeProxyTargets(processIdentifier: pid_t) {
+        guard processIdentifier > 0 else { return }
+        let oldCount = cachedProxyTargets.count
+        cachedProxyTargets.removeAll { $0.processIdentifier == processIdentifier }
+        guard cachedProxyTargets.count != oldCount else { return }
+
+        cachedProxyTargetsLoadedAt = Date()
+        renderCachedProxyTargetsIfBoxVisible()
+    }
+
+    private func renderCachedProxyTargetsIfBoxVisible() {
+        guard boxWindowController.isShowing,
+              let anchorFrame = statusItem?.button?.window?.frame,
+              let tapeFrame = tapeItem?.button?.window?.frame,
+              let screen = MenuBarGeometry.screen(containing: NSPoint(x: anchorFrame.midX, y: anchorFrame.midY)) else {
+            return
+        }
+
+        boxWindowController.showProxyTargets(
+            anchorFrame: anchorFrame,
+            screen: screen,
+            proxyTargets: cachedProxyTargets(before: tapeFrame)
+        )
+        scheduleAutoHideIfNeeded()
+    }
+
+    private func isQuitMenuSelection(_ selection: MenuBarProxyMenuSelection) -> Bool {
+        let titles = (selection.path + [selection.item.title])
+            .map { normalizedMenuCommandTitle($0) }
+            .filter { !$0.isEmpty }
+
+        return titles.contains { title in
+            let localizedQuit = "\u{C885}\u{B8CC}"
+            let localizedClose = "\u{B05D}\u{B0B4}\u{AE30}"
+            return title == "quit" ||
+                title.hasPrefix("quit ") ||
+                title == "exit" ||
+                title.hasPrefix("exit ") ||
+                title == localizedQuit ||
+                title.hasSuffix(" \(localizedQuit)") ||
+                title == localizedClose ||
+                title.hasSuffix(" \(localizedClose)")
+        }
+    }
+
+    private func normalizedMenuCommandTitle(_ title: String) -> String {
+        title
+            .replacingOccurrences(of: "\u{2026}", with: "")
+            .replacingOccurrences(of: "...", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+    }
+
     private func hiddenIconsCaptureRect(tapeFrame: NSRect, screen: NSScreen) -> NSRect {
         let menu = MenuBarGeometry.menuBarRect(for: screen)
         let right = max(menu.minX, min(menu.maxX, tapeFrame.minX - 2))
         let left = max(menu.minX, right - HiddenBoxLayout.maxCaptureWidth)
         return NSRect(x: left, y: menu.minY, width: max(1, right - left), height: menu.height)
+    }
+
+    private func handleBoxIconClick(click: MenuBarProxyClick, button: CGMouseButton) {
+        switch button {
+        case .left:
+            guard let target = click.target else {
+                boxWindowController.showStatus("Failed: No target")
+                scheduleAutoHideIfNeeded(minimumDelay: 15)
+                return
+            }
+            activateTargetApplication(target)
+        case .right:
+            forwardClickToMenuBar(click: click, button: button)
+        default:
+            forwardClickToMenuBar(click: click, button: button)
+        }
     }
 
     private func forwardClickToMenuBar(click: MenuBarProxyClick, button: CGMouseButton) {
@@ -643,6 +811,114 @@ final class StatusBoxController: NSObject {
         }
     }
 
+    private func activateTargetApplication(_ target: MenuBarProxyTarget) {
+        autoHideTimer?.invalidate()
+        autoHideTimer = nil
+
+        guard let app = runningApplication(for: target) else {
+            boxWindowController.showStatus("Failed: App not running")
+            scheduleAutoHideIfNeeded(minimumDelay: 15)
+            return
+        }
+
+        boxWindowController.close()
+        DispatchQueue.main.async { [weak self] in
+            self?.performTargetApplicationActivation(app, target: target)
+        }
+    }
+
+    private func performTargetApplicationActivation(_ app: NSRunningApplication, target: MenuBarProxyTarget) {
+        if app.isHidden {
+            app.unhide()
+        }
+
+        _ = app.activate(options: [.activateIgnoringOtherApps, .activateAllWindows])
+        let windowActivation = raiseApplicationWindows(processIdentifier: app.processIdentifier)
+        if windowActivation.didRaiseWindow {
+            scheduleAutoHideIfNeeded(minimumDelay: 10)
+            return
+        }
+
+        if windowActivation.hasWindows {
+            scheduleAutoHideIfNeeded(minimumDelay: 10)
+            return
+        }
+
+        reopenApplicationBundle(app, target: target)
+    }
+
+    private func runningApplication(for target: MenuBarProxyTarget) -> NSRunningApplication? {
+        if let app = NSRunningApplication(processIdentifier: target.processIdentifier) {
+            return app
+        }
+
+        if !target.bundleIdentifier.isEmpty,
+           let app = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == target.bundleIdentifier }) {
+            return app
+        }
+
+        guard !target.appName.isEmpty else { return nil }
+        return NSWorkspace.shared.runningApplications.first { $0.localizedName == target.appName }
+    }
+
+    private func raiseApplicationWindows(processIdentifier pid: pid_t) -> ApplicationWindowActivationResult {
+        guard ClickForwarder.accessibilityTrusted else {
+            return ApplicationWindowActivationResult(hasWindows: false, didRaiseWindow: false)
+        }
+
+        let axApp = AXUIElementCreateApplication(pid)
+        var windowsValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &windowsValue) == .success,
+              let windows = windowsValue as? [AXUIElement],
+              !windows.isEmpty else {
+            return ApplicationWindowActivationResult(hasWindows: false, didRaiseWindow: false)
+        }
+
+        var didRaiseWindow = false
+        for window in windows {
+            var minimizedValue: CFTypeRef?
+            if AXUIElementCopyAttributeValue(window, kAXMinimizedAttribute as CFString, &minimizedValue) == .success,
+               (minimizedValue as? Bool) == true {
+                AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
+            }
+
+            if AXUIElementPerformAction(window, kAXRaiseAction as CFString) == .success {
+                didRaiseWindow = true
+            }
+            AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+            AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+        }
+
+        return ApplicationWindowActivationResult(hasWindows: true, didRaiseWindow: didRaiseWindow)
+    }
+
+    private func reopenApplicationBundle(_ app: NSRunningApplication, target: MenuBarProxyTarget) {
+        guard let bundleURL = app.bundleURL else {
+            NSLog("[StatusBox] Failed to activate app without bundle URL: %@", target.displayName)
+            scheduleAutoHideIfNeeded(minimumDelay: 30)
+            return
+        }
+
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        NSWorkspace.shared.openApplication(at: bundleURL, configuration: configuration) { [weak self] reopenedApp, error in
+            DispatchQueue.main.async {
+                guard let self else { return }
+
+                if let error {
+                    NSLog("[StatusBox] Failed to reopen %@: %@", target.displayName, error.localizedDescription)
+                    self.scheduleAutoHideIfNeeded(minimumDelay: 30)
+                    return
+                }
+
+                let appToRaise = reopenedApp ?? app
+                _ = appToRaise.activate(options: [.activateIgnoringOtherApps, .activateAllWindows])
+                _ = self.raiseApplicationWindows(processIdentifier: appToRaise.processIdentifier)
+                self.scheduleAutoHideIfNeeded(minimumDelay: 10)
+            }
+        }
+    }
+
     private func showProxyMenuIfAvailable(
         for target: MenuBarProxyTarget,
         items: [MenuBarProxyMenuItem],
@@ -660,6 +936,9 @@ final class StatusBoxController: NSObject {
             guard let self else { return }
             let result = ClickForwarder.performProxyMenuSelection(selection, target: target)
             self.boxWindowController.showStatus("\(result.title): \(selection.item.title)")
+            if result.didForward, self.isQuitMenuSelection(selection) {
+                self.removeProxyTargets(processIdentifier: target.processIdentifier)
+            }
             if result.didForward {
                 self.scheduleAutoHideIfNeeded(minimumDelay: 10)
             } else {
@@ -724,11 +1003,26 @@ final class StatusBoxController: NSObject {
         if isHidden {
             hideHiddenIcons()
         }
+        scheduleProxyTargetCacheRefreshes(delays: ProxyTargetCacheTiming.environmentRefreshDelays)
     }
 
     @objc private func activeSpaceChanged() {
         if isHidden {
             hideHiddenIcons()
         }
+        scheduleProxyTargetCacheRefreshes(delays: ProxyTargetCacheTiming.environmentRefreshDelays)
+    }
+
+    @objc private func runningApplicationsChanged() {
+        scheduleProxyTargetCacheRefreshes(delays: ProxyTargetCacheTiming.appChangeRefreshDelays)
+    }
+
+    @objc private func runningApplicationTerminated(_ notification: Notification) {
+        if let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication {
+            removeProxyTargets(processIdentifier: app.processIdentifier)
+        } else if let app = notification.object as? NSRunningApplication {
+            removeProxyTargets(processIdentifier: app.processIdentifier)
+        }
+        scheduleProxyTargetCacheRefreshes(delays: ProxyTargetCacheTiming.appChangeRefreshDelays)
     }
 }
