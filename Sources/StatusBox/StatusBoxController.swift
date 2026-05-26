@@ -234,6 +234,8 @@ final class StatusBoxController: NSObject {
     }
 
     fileprivate func handleKeyboardShortcut(id: UInt32) {
+        guard store.settings.shortcutsEnabled else { return }
+
         switch id {
         case StatusBoxHotKey.menuBarIconID:
             toggleHiddenIcons()
@@ -323,7 +325,11 @@ final class StatusBoxController: NSObject {
 
     private func refreshKeyboardShortcuts() {
         unregisterKeyboardShortcuts()
-        guard hotKeyEventHandler != nil, !isRecordingShortcut else { return }
+        guard hotKeyEventHandler != nil,
+              !isRecordingShortcut,
+              store.settings.shortcutsEnabled else {
+            return
+        }
 
         let menuBarShortcut = store.settings.menuBarIconShortcut
         let boxUIShortcut = store.settings.boxUIShortcut

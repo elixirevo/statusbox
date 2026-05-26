@@ -123,6 +123,11 @@ struct SettingsView: View {
             }
 
             Section("Shortcuts") {
+                Toggle("Enable shortcuts", isOn: Binding(
+                    get: { store.settings.shortcutsEnabled },
+                    set: { enabled in store.update { $0.shortcutsEnabled = enabled } }
+                ))
+
                 shortcutRow(
                     "Menu bar icon",
                     target: .menuBarIcon,
