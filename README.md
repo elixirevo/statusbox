@@ -63,7 +63,7 @@ brew install --cask status-box
 1. Clone the repository:
 
    ```bash
-   git clone https://github.com/elixirevo/status-box.git
+   git clone https://github.com/elixirevo/statusbox.git
    cd status-box
    ```
 
