@@ -7,6 +7,7 @@ APP_DIR="$ROOT_DIR/dist/StatusBox.app"
 BUILD_CONFIG="${BUILD_CONFIG:-release}"
 
 cd "$ROOT_DIR"
+"$ROOT_DIR/scripts/generate_app_icon.sh"
 swift build -c "$BUILD_CONFIG"
 
 rm -rf "$APP_DIR"
