@@ -247,6 +247,11 @@ struct SettingsView: View {
     private var displayTab: some View {
         Form {
             Section("Box Icons") {
+                Toggle("Show Box UI alerts", isOn: Binding(
+                    get: { store.settings.boxStatusMessagesEnabled },
+                    set: { enabled in store.update { $0.boxStatusMessagesEnabled = enabled } }
+                ))
+
                 HStack(alignment: .center) {
                     Text("Icons per row")
                     Spacer()

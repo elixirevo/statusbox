@@ -202,6 +202,7 @@ struct AppSettings: Codable, Equatable {
     var boxMaxRows: Int
     var boxMaxColumns: Int
     var boxUIEnabled: Bool
+    var boxStatusMessagesEnabled: Bool
     var boxIconLeftClickAction: BoxIconAction
     var boxIconRightClickAction: BoxIconAction
     var menuBarIconShortcut: KeyboardShortcutSetting
@@ -220,6 +221,7 @@ struct AppSettings: Codable, Equatable {
         boxMaxRows: 2,
         boxMaxColumns: 10,
         boxUIEnabled: true,
+        boxStatusMessagesEnabled: true,
         boxIconLeftClickAction: .toggleHiddenIcons,
         boxIconRightClickAction: .showBoxUI,
         menuBarIconShortcut: .defaultMenuBarIcon,
@@ -239,6 +241,7 @@ struct AppSettings: Codable, Equatable {
         boxMaxRows: Int,
         boxMaxColumns: Int,
         boxUIEnabled: Bool,
+        boxStatusMessagesEnabled: Bool,
         boxIconLeftClickAction: BoxIconAction,
         boxIconRightClickAction: BoxIconAction,
         menuBarIconShortcut: KeyboardShortcutSetting,
@@ -256,6 +259,7 @@ struct AppSettings: Codable, Equatable {
         self.boxMaxRows = boxMaxRows
         self.boxMaxColumns = boxMaxColumns
         self.boxUIEnabled = boxUIEnabled
+        self.boxStatusMessagesEnabled = boxStatusMessagesEnabled
         self.boxIconLeftClickAction = boxIconLeftClickAction
         self.boxIconRightClickAction = boxIconRightClickAction
         self.menuBarIconShortcut = menuBarIconShortcut
@@ -276,6 +280,7 @@ struct AppSettings: Codable, Equatable {
         boxMaxRows = try container.decodeIfPresent(Int.self, forKey: .boxMaxRows) ?? 2
         boxMaxColumns = try container.decodeIfPresent(Int.self, forKey: .boxMaxColumns) ?? 10
         boxUIEnabled = try container.decodeIfPresent(Bool.self, forKey: .boxUIEnabled) ?? true
+        boxStatusMessagesEnabled = try container.decodeIfPresent(Bool.self, forKey: .boxStatusMessagesEnabled) ?? true
         boxIconLeftClickAction = try container.decodeIfPresent(BoxIconAction.self, forKey: .boxIconLeftClickAction) ?? .toggleHiddenIcons
         boxIconRightClickAction = try container.decodeIfPresent(BoxIconAction.self, forKey: .boxIconRightClickAction) ?? .showBoxUI
         menuBarIconShortcut = try container.decodeIfPresent(KeyboardShortcutSetting.self, forKey: .menuBarIconShortcut) ?? .defaultMenuBarIcon

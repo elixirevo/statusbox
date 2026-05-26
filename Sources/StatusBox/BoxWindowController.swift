@@ -16,8 +16,7 @@ private enum BoxLayout {
 
 private enum GlassBoxStyle {
     static let cornerRadius: CGFloat = 8
-    static let borderInset: CGFloat = 0.5
-    static let material: NSVisualEffectView.Material = .hudWindow
+    static let material: NSVisualEffectView.Material = .popover
 }
 
 final class BoxWindowController {
@@ -74,7 +73,7 @@ final class BoxWindowController {
         panel.collectionBehavior = NSWindow.CollectionBehavior([.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle])
         panel.backgroundColor = NSColor.clear
         panel.isOpaque = false
-        panel.hasShadow = true
+        panel.hasShadow = false
         panel.hidesOnDeactivate = false
 
         let content = IconStripView(frame: NSRect(origin: .zero, size: frame.size))
@@ -85,7 +84,10 @@ final class BoxWindowController {
         content.rangeRect = rangeRect
         content.proxyTargets = proxyTargets
         content.iconSize = CGFloat(settingsStore.settings.boxIconSize)
-        content.statusText = initialStatusText(proxyTargets: proxyTargets)
+        content.showsStatusText = settingsStore.settings.boxStatusMessagesEnabled
+        content.statusText = settingsStore.settings.boxStatusMessagesEnabled
+            ? initialStatusText(proxyTargets: proxyTargets)
+            : nil
         content.onClick = { [weak self] (click: MenuBarProxyClick, button: CGMouseButton) in
             if button != .left {
                 self?.prepareForForwardedClick(click)
@@ -116,12 +118,15 @@ final class BoxWindowController {
         let columns = max(1, min(maxColumns, maxGridColumns, max(1, proxyTargets.count)))
         let rows = max(1, Int(ceil(Double(max(1, proxyTargets.count)) / Double(columns))))
         let rowHeight = iconSize + BoxLayout.iconRowExtraHeight
+        let statusReserveHeight = settingsStore.settings.boxStatusMessagesEnabled ? BoxLayout.statusReserveHeight : 0
         let minimumGridWidth = padding * 2 + iconSize
         let fittedGridWidth = padding * 2 + CGFloat(columns) * iconSize + CGFloat(max(0, columns - 1)) * gap
         let width = min(maxWidth, max(minimumGridWidth, fittedGridWidth))
+        let fittedGridHeight = padding * 2 + CGFloat(rows) * rowHeight + statusReserveHeight
+        let minimumHeight = settingsStore.settings.boxStatusMessagesEnabled ? max(54, fittedGridHeight) : fittedGridHeight
         let height = min(
             screen.visibleFrame.height - 24,
-            max(54, padding * 2 + CGFloat(rows) * rowHeight + BoxLayout.statusReserveHeight)
+            minimumHeight
         )
 
         let proposed = NSRect(
@@ -137,7 +142,7 @@ final class BoxWindowController {
         panel.collectionBehavior = NSWindow.CollectionBehavior([.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle])
         panel.backgroundColor = NSColor.clear
         panel.isOpaque = false
-        panel.hasShadow = true
+        panel.hasShadow = false
         panel.hidesOnDeactivate = false
 
         let content = IconStripView(frame: NSRect(origin: .zero, size: frame.size))
@@ -146,7 +151,10 @@ final class BoxWindowController {
         content.maxGridColumns = maxGridColumns
         content.rangeRect = .zero
         content.proxyTargets = proxyTargets
-        content.statusText = statusText ?? initialStatusText(proxyTargets: proxyTargets)
+        content.showsStatusText = settingsStore.settings.boxStatusMessagesEnabled
+        content.statusText = settingsStore.settings.boxStatusMessagesEnabled
+            ? statusText ?? initialStatusText(proxyTargets: proxyTargets)
+            : nil
         content.onClick = { [weak self] (click: MenuBarProxyClick, button: CGMouseButton) in
             if button != .left {
                 self?.prepareForForwardedClick(click)
@@ -162,6 +170,7 @@ final class BoxWindowController {
     }
 
     func showStatus(_ text: String, duration: TimeInterval = 2.8) {
+        guard settingsStore.settings.boxStatusMessagesEnabled else { return }
         guard let content = iconStripView else { return }
         content.statusText = text
         content.needsDisplay = true
@@ -409,10 +418,9 @@ final class GlassBoxContentView: NSVisualEffectView {
         material = GlassBoxStyle.material
         blendingMode = .behindWindow
         state = .active
-        isEmphasized = true
+        isEmphasized = false
         wantsLayer = true
-        layer?.cornerRadius = GlassBoxStyle.cornerRadius
-        layer?.masksToBounds = true
+        updateChrome()
 
         iconStripView.frame = bounds
         iconStripView.autoresizingMask = [.width, .height]
@@ -421,6 +429,22 @@ final class GlassBoxContentView: NSVisualEffectView {
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateChrome()
+    }
+
+    private func updateChrome() {
+        wantsLayer = true
+        layer?.cornerRadius = GlassBoxStyle.cornerRadius
+        if #available(macOS 10.15, *) {
+            layer?.cornerCurve = .continuous
+        }
+        layer?.masksToBounds = true
+        layer?.borderWidth = 0
+        layer?.borderColor = nil
     }
 }
 
@@ -453,6 +477,7 @@ final class IconStripView: NSView {
     var rangeRect: NSRect = .zero
     var proxyTargets: [MenuBarProxyTarget] = []
     var onClick: ((MenuBarProxyClick, CGMouseButton) -> Void)?
+    var showsStatusText = true
     var statusText: String?
     private var hoveredTarget: MenuBarProxyTarget?
     private var trackingArea: NSTrackingArea?
@@ -462,10 +487,6 @@ final class IconStripView: NSView {
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        wantsLayer = true
-        layer?.cornerRadius = GlassBoxStyle.cornerRadius
-        layer?.masksToBounds = true
-        layer?.backgroundColor = NSColor.clear.cgColor
     }
 
     required init?(coder: NSCoder) {
@@ -476,13 +497,11 @@ final class IconStripView: NSView {
         if usesTargetGrid {
             drawTargetGrid()
             drawStatusText()
-            drawNativeMaterialBorder()
             return
         }
 
         guard let image else {
             drawPlaceholder()
-            drawNativeMaterialBorder()
             return
         }
 
@@ -491,7 +510,6 @@ final class IconStripView: NSView {
         NSImage(cgImage: image, size: drawRect.size).draw(in: drawRect)
         drawHoverHighlight()
         drawStatusText()
-        drawNativeMaterialBorder()
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -673,10 +691,10 @@ final class IconStripView: NSView {
         guard !rect.isEmpty else { return }
 
         let isDark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        NSColor.controlAccentColor.withAlphaComponent(isDark ? 0.24 : 0.16).setFill()
+        NSColor.selectedContentBackgroundColor.withAlphaComponent(isDark ? 0.26 : 0.14).setFill()
         NSBezierPath(roundedRect: rect, xRadius: 5, yRadius: 5).fill()
 
-        NSColor.separatorColor.withAlphaComponent(0.34).setStroke()
+        NSColor.separatorColor.withAlphaComponent(isDark ? 0.24 : 0.18).setStroke()
         let outline = NSBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), xRadius: 5, yRadius: 5)
         outline.lineWidth = 1
         outline.stroke()
@@ -811,6 +829,7 @@ final class IconStripView: NSView {
     }
 
     private func drawStatusText() {
+        guard showsStatusText else { return }
         guard let statusText, !statusText.isEmpty else { return }
 
         let attrs: [NSAttributedString.Key: Any] = [
@@ -826,10 +845,10 @@ final class IconStripView: NSView {
         )
 
         let path = NSBezierPath(roundedRect: rect, xRadius: 5, yRadius: 5)
-        NSColor.controlBackgroundColor.withAlphaComponent(0.56).setFill()
+        NSColor.controlBackgroundColor.withAlphaComponent(0.36).setFill()
         path.fill()
 
-        NSColor.separatorColor.withAlphaComponent(0.38).setStroke()
+        NSColor.separatorColor.withAlphaComponent(0.24).setStroke()
         path.lineWidth = 1
         path.stroke()
 
@@ -850,25 +869,4 @@ final class IconStripView: NSView {
         placeholderText.draw(in: bounds.insetBy(dx: 12, dy: bounds.height / 2 - 8), withAttributes: attrs)
     }
 
-    private func drawNativeMaterialBorder() {
-        let rect = bounds.insetBy(dx: GlassBoxStyle.borderInset, dy: GlassBoxStyle.borderInset)
-        let path = NSBezierPath(
-            roundedRect: rect,
-            xRadius: GlassBoxStyle.cornerRadius,
-            yRadius: GlassBoxStyle.cornerRadius
-        )
-
-        NSColor.separatorColor.withAlphaComponent(0.42).setStroke()
-        path.lineWidth = 1
-        path.stroke()
-
-        let highlight = NSBezierPath(
-            roundedRect: rect.insetBy(dx: 1, dy: 1),
-            xRadius: max(0, GlassBoxStyle.cornerRadius - 1),
-            yRadius: max(0, GlassBoxStyle.cornerRadius - 1)
-        )
-        NSColor.white.withAlphaComponent(0.22).setStroke()
-        highlight.lineWidth = 1
-        highlight.stroke()
-    }
 }
