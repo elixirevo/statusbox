@@ -24,6 +24,10 @@ private enum ProxyTargetCacheTiming {
     static let periodicRefreshInterval: TimeInterval = 30
 }
 
+private enum ApplicationActivationTiming {
+    static let windowCheckDelays: [TimeInterval] = [0.08, 0.22, 0.4]
+}
+
 private enum StatusBoxHotKey {
     static let signature: OSType = 0x53544258
     static let menuBarIconID: UInt32 = 1
@@ -816,12 +820,11 @@ final class StatusBoxController: NSObject {
         autoHideTimer = nil
 
         guard let app = runningApplication(for: target) else {
-            boxWindowController.showStatus("Failed: App not running")
+            boxWindowController.showStatus("Unsupported app: \(target.displayName)")
             scheduleAutoHideIfNeeded(minimumDelay: 15)
             return
         }
 
-        boxWindowController.close()
         DispatchQueue.main.async { [weak self] in
             self?.performTargetApplicationActivation(app, target: target)
         }
@@ -835,11 +838,13 @@ final class StatusBoxController: NSObject {
         _ = app.activate(options: [.activateIgnoringOtherApps, .activateAllWindows])
         let windowActivation = raiseApplicationWindows(processIdentifier: app.processIdentifier)
         if windowActivation.didRaiseWindow {
+            boxWindowController.close()
             scheduleAutoHideIfNeeded(minimumDelay: 10)
             return
         }
 
         if windowActivation.hasWindows {
+            boxWindowController.close()
             scheduleAutoHideIfNeeded(minimumDelay: 10)
             return
         }
@@ -895,7 +900,7 @@ final class StatusBoxController: NSObject {
     private func reopenApplicationBundle(_ app: NSRunningApplication, target: MenuBarProxyTarget) {
         guard let bundleURL = app.bundleURL else {
             NSLog("[StatusBox] Failed to activate app without bundle URL: %@", target.displayName)
-            scheduleAutoHideIfNeeded(minimumDelay: 30)
+            markTargetApplicationUnsupported(target)
             return
         }
 
@@ -907,16 +912,53 @@ final class StatusBoxController: NSObject {
 
                 if let error {
                     NSLog("[StatusBox] Failed to reopen %@: %@", target.displayName, error.localizedDescription)
-                    self.scheduleAutoHideIfNeeded(minimumDelay: 30)
+                    self.markTargetApplicationUnsupported(target)
                     return
                 }
 
                 let appToRaise = reopenedApp ?? app
                 _ = appToRaise.activate(options: [.activateIgnoringOtherApps, .activateAllWindows])
-                _ = self.raiseApplicationWindows(processIdentifier: appToRaise.processIdentifier)
-                self.scheduleAutoHideIfNeeded(minimumDelay: 10)
+                self.verifyTargetApplicationWindow(
+                    app: appToRaise,
+                    target: target,
+                    delays: ApplicationActivationTiming.windowCheckDelays
+                )
             }
         }
+    }
+
+    private func verifyTargetApplicationWindow(
+        app: NSRunningApplication,
+        target: MenuBarProxyTarget,
+        delays: [TimeInterval]
+    ) {
+        guard let delay = delays.first else {
+            markTargetApplicationUnsupported(target)
+            return
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self else { return }
+
+            _ = app.activate(options: [.activateIgnoringOtherApps, .activateAllWindows])
+            let windowActivation = self.raiseApplicationWindows(processIdentifier: app.processIdentifier)
+            if windowActivation.hasWindows || windowActivation.didRaiseWindow {
+                self.boxWindowController.close()
+                self.scheduleAutoHideIfNeeded(minimumDelay: 10)
+                return
+            }
+
+            self.verifyTargetApplicationWindow(
+                app: app,
+                target: target,
+                delays: Array(delays.dropFirst())
+            )
+        }
+    }
+
+    private func markTargetApplicationUnsupported(_ target: MenuBarProxyTarget) {
+        boxWindowController.showStatus("Unsupported app: \(target.displayName)")
+        scheduleAutoHideIfNeeded(minimumDelay: 30)
     }
 
     private func showProxyMenuIfAvailable(
