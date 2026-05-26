@@ -1,52 +1,164 @@
-# Status Box
+# Status Box 📦
 
-Status Box는 macOS 메뉴 막대에서 테이프 기준선과 그 왼쪽에 둔 상태 아이콘들을 숨기고, 필요할 때 다시 보여주는 메뉴 바 앱 프로토타입입니다.
+![Platform](https://img.shields.io/badge/Platform-macOS-lightgrey.svg)
+![Swift](https://img.shields.io/badge/Swift-5.0-orange.svg)
+![License](https://img.shields.io/badge/License-MIT-blue.svg)
 
-## 빌드
+<img src="./icon.png" alt="Status Box Icon" width="160" />
+
+**Status Box** is a lightweight, native macOS menu bar utility that keeps your crowded status bar under control. Place the tape marker after the icons you want to hide, then use the box icon or shortcuts to hide, reveal, or open those menu bar apps from a compact floating Box UI.
+
+## ✨ Features
+
+* **Menu Bar Icon Hiding:** Hide status bar icons to the left of the tape marker without quitting the underlying apps.
+* **Tape Marker Workflow:** Use the tape icon as the boundary that decides which menu bar icons belong in Status Box.
+* **Compact Box UI:** Open a floating macOS glass-style Box UI that shows hidden menu bar apps as icons.
+* **App Window Activation:** Left-click an app icon in Box UI to bring that app's window forward when supported.
+* **Native Menu Access:** Right-click an app icon in Box UI to open its native `NSMenu` when the app exposes one.
+* **Unsupported App Feedback:** Apps that cannot open a window or expose a usable native menu are shown as unsupported.
+* **Auto-Hide:** Automatically hide menu bar icons again after a configurable delay.
+* **Configurable Icon Grid:** Choose how many Box UI icons appear per row.
+* **Optional Box UI Alerts:** Turn Box UI alert text on or off. When alerts are off, the Box UI trims its lower spacing.
+* **Configurable Shortcuts:** Change or disable global shortcuts from Settings.
+* **Launch at Login:** Start Status Box automatically when you sign in.
+* **Lightweight & Native:** Built with Swift and AppKit. No Electron.
+
+## ⌨️ Shortcuts
+
+| Shortcut | Action |
+| --- | --- |
+| `Option + B` | Toggle hidden menu bar icons |
+| `Command + B` | Toggle Box UI |
+
+*You can change shortcuts from Settings > General > Shortcuts.*
+*You can disable all shortcuts with Settings > General > Shortcuts > Enable shortcuts.*
+*If a shortcut conflicts with another app, choose a less common combination or disable Status Box shortcuts.*
+
+## 🚀 Installation & Build
+
+Status Box is built with Swift Package Manager and a small app-bundle build script.
+
+### Install via Homebrew
+
+Once a release is published and the cask is added to `elixirevo/tap`, install with:
 
 ```bash
-swift build
+brew tap elixirevo/tap
+brew install --cask status-box
 ```
 
-앱 번들은 다음 명령으로 생성합니다.
+If you already tapped `elixirevo/tap`, this also works:
 
 ```bash
-scripts/build_app.sh
+brew install --cask status-box
 ```
 
-생성 결과:
+### Prerequisites
+
+* macOS 13.0 or later
+* Xcode Command Line Tools (`xcode-select --install`)
+
+### Build Steps
+
+1. Clone the repository:
+
+   ```bash
+   git clone https://github.com/elixirevo/status-box.git
+   cd status-box
+   ```
+
+2. Build the Swift executable:
+
+   ```bash
+   swift build
+   ```
+
+3. Build the macOS app bundle:
+
+   ```bash
+   ./scripts/build_app.sh
+   ```
+
+4. The built application will be located at:
+
+   ```text
+   dist/StatusBox.app
+   ```
+
+5. Move it to your Applications folder:
+
+   ```bash
+   mv dist/StatusBox.app /Applications/
+   ```
+
+### Build a Universal DMG
+
+Build a universal app (`arm64 + x86_64`) and package it as a DMG:
+
+```bash
+./scripts/build_dmg.sh
+```
+
+This creates:
 
 ```text
-dist/StatusBox.app
+dist/StatusBox-1.0.0-universal.dmg
 ```
 
-## 현재 구현 범위
+You can override release metadata when needed:
 
-- 메뉴 막대 Status Box 상자 아이콘
-- 메뉴 막대 테이프 기준선 아이콘
-- 우클릭 컨텍스트 메뉴
-- 테이프 기준선과 그 왼쪽 상태 아이콘 숨김
-- 보이지 않는 메뉴 바 스페이서 기반 숨김
-- 메뉴 막대 방식 표시
-- Option-상자 클릭으로 숨긴 아이콘 박스 UI 표시
-- 박스 UI에서 AX 상태 아이템 프록시 클릭/우클릭
-- 모니터별 표시 방식 설정
-- 자동 재숨김 설정
-- 로그인 시 자동 실행 토글
+```bash
+VERSION=1.0.0 BUILD=1 ./scripts/build_dmg.sh
+```
 
-## 구현상 제약
+The script also prints the SHA-256 checksum.
 
-macOS 공개 API는 타사 상태 아이콘을 직접 소유하거나 제거하는 기능을 제공하지 않습니다.
-그래서 현재 구현은 Dozer와 같은 방식으로 테이프 기준 아이콘의 길이를 매우 크게 늘려, 테이프와 그 왼쪽의 상태 아이콘들을 메뉴 바 밖으로 밀어내는 방식입니다.
-박스 UI는 화면 캡처가 아니라 Accessibility의 `AXExtrasMenuBar`에서 찾은 상태 아이템 프록시 목록을 보여줍니다.
-따라서 노치나 메뉴 막대 공간 부족으로 실제 상단 바에 보이지 않는 상태 아이템도 박스 안에 표시할 수 있습니다.
+### Prepare a Homebrew Release
 
-## 사용 방법
+Before publishing the Homebrew cask:
 
-메뉴 막대에는 상자 아이콘과 테이프 기준선 아이콘 두 개가 표시됩니다.
-macOS의 Command-드래그로 테이프 아이콘을 숨길 앱 아이콘들의 오른쪽에 놓습니다.
-상자 아이콘을 클릭하면 테이프와 그 왼쪽의 상태 아이콘들이 메뉴 바 밖으로 밀려나며, 다시 클릭하면 원래대로 보입니다.
-Option을 누른 채 상자 아이콘을 클릭하면 숨겨진 아이콘 박스 UI가 열립니다.
+1. Upload `dist/StatusBox-1.0.0-universal.dmg` to the GitHub release `v1.0.0`.
+2. Copy `homebrew/Casks/status-box.rb` into the `elixirevo/homebrew-tap` repository.
+3. Replace `REPLACE_WITH_RELEASE_SHA256` with the printed checksum.
+4. Update the cask `version` when releasing a new app version.
 
-박스 UI를 사용하고 박스 안 아이콘을 클릭/우클릭하려면 손쉬운 사용 권한이 필요합니다.
-개발 빌드는 `com.elixirevo.StatusBox` 지정 요구조건으로 서명됩니다. 손쉬운 사용 권한이 계속 적용되지 않으면 기존 Status Box 항목을 제거한 뒤 `dist/StatusBox.app`을 다시 추가하세요.
+## 🔒 Permissions
+
+Status Box requires:
+
+1. **Accessibility:** Required to discover menu bar status items and open supported native menus from Box UI.
+
+If Accessibility permission does not apply after rebuilding the app, remove the old Status Box entry from System Settings > Privacy & Security > Accessibility, then add `dist/StatusBox.app` again.
+
+*Note: Status Box works locally on your Mac. It does not send menu bar data or app information over the network.*
+
+## 🧭 Usage
+
+1. Launch Status Box.
+2. Move the tape icon with macOS Command-drag so it sits to the right of the menu bar icons you want to hide.
+3. Click the box icon or press `Option + B` to hide or show those icons.
+4. Right-click the box icon or press `Command + B` to open Box UI.
+5. In Box UI:
+   * Left-click an app icon to open its app window when supported.
+   * Right-click an app icon to open its native menu when supported.
+6. Right-click the tape icon to open Settings or quit Status Box.
+
+## ⚠️ Limitations
+
+macOS does not provide a public API for taking ownership of third-party menu bar icons. Status Box uses the same general hiding approach as menu bar spacer utilities: it moves the tape marker to push selected icons out of the visible menu bar area.
+
+Box UI support depends on what each app exposes through Accessibility and native menu APIs. Some apps show a window, some expose an `NSMenu`, and some do neither in a way Status Box can safely control.
+
+## 🛠 Contributing
+
+Contributions are welcome. If you have ideas for new features, bug fixes, or improvements, feel free to open an issue or submit a pull request.
+
+1. Fork the project
+2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
+3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
+4. Push to the branch (`git push origin feature/AmazingFeature`)
+5. Open a pull request
+
+## 📄 License
+
+Distributed under the MIT License. See `LICENSE` for more information.
