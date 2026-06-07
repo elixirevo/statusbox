@@ -10,9 +10,15 @@ let package = Package(
     products: [
         .executable(name: "StatusBox", targets: ["StatusBox"])
     ],
+    dependencies: [
+        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.0.0")
+    ],
     targets: [
         .executableTarget(
             name: "StatusBox",
+            dependencies: [
+                .product(name: "Sparkle", package: "Sparkle")
+            ],
             swiftSettings: [
                 .swiftLanguageMode(.v5)
             ]

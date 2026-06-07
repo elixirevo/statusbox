@@ -1,4 +1,5 @@
 import AppKit
+import Sparkle
 
 @main
 enum StatusBoxApplication {
@@ -14,9 +15,16 @@ enum StatusBoxApplication {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var controller: StatusBoxController?
+    private let updaterController = SPUStandardUpdaterController(
+        startingUpdater: true,
+        updaterDelegate: nil,
+        userDriverDelegate: nil
+    )
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let controller = StatusBoxController()
+        let controller = StatusBoxController(checkForUpdates: { [updaterController] in
+            updaterController.checkForUpdates(nil)
+        })
         self.controller = controller
         controller.start()
     }

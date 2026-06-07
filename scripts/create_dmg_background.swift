@@ -1,8 +1,8 @@
 import AppKit
 import Foundation
 
-guard CommandLine.arguments.count == 2 else {
-    fputs("Usage: create_dmg_background.swift <output.png>\n", stderr)
+guard CommandLine.arguments.count >= 2 else {
+    fputs("Usage: create_dmg_background.swift <output.png> [app-name]\n", stderr)
     exit(1)
 }
 

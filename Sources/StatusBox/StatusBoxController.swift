@@ -68,6 +68,7 @@ private func statusBoxHotKeyHandler(
 }
 
 final class StatusBoxController: NSObject {
+    private let checkForUpdates: (() -> Void)?
     private let store = SettingsStore()
     private lazy var overlayManager = OverlayManager(store: store)
 
@@ -91,6 +92,11 @@ final class StatusBoxController: NSObject {
     private var proxyTargetWarmupAttempt = 0
     private var cachedProxyTargets: [MenuBarProxyTarget] = []
     private var cachedProxyTargetsLoadedAt: Date?
+
+    init(checkForUpdates: (() -> Void)? = nil) {
+        self.checkForUpdates = checkForUpdates
+        super.init()
+    }
 
     deinit {
         proxyTargetScanTask?.cancel()
@@ -418,6 +424,9 @@ final class StatusBoxController: NSObject {
     private func showContextMenu(from button: NSStatusBarButton) {
         let menu = NSMenu()
         menu.addItem(NSMenuItem(title: "Open Settings", action: #selector(openSettingsMenuAction), keyEquivalent: ","))
+        if checkForUpdates != nil {
+            menu.addItem(NSMenuItem(title: "Check for Updates...", action: #selector(checkForUpdatesMenuAction), keyEquivalent: ""))
+        }
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit Status Box", action: #selector(quitMenuAction), keyEquivalent: "q"))
 
@@ -465,6 +474,10 @@ final class StatusBoxController: NSObject {
 
     @objc private func openSettingsMenuAction() {
         openSettings()
+    }
+
+    @objc private func checkForUpdatesMenuAction() {
+        checkForUpdates?()
     }
 
     @objc private func quitMenuAction() {

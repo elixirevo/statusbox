@@ -17,9 +17,9 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0.0</string>
+    <string>1.1.0</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>110</string>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
     <key>LSUIElement</key>
@@ -28,5 +28,11 @@
     <true/>
     <key>NSScreenCaptureUsageDescription</key>
     <string>Status Box uses Screen Recording access to show hidden menu bar items in Box UI.</string>
+    <key>SUEnableAutomaticChecks</key>
+    <true/>
+    <key>SUFeedURL</key>
+    <string>https://github.com/elixirevo/statusbox/releases/latest/download/appcast.xml</string>
+    <key>SUPublicEDKey</key>
+    <string>WqbePVnRnb1iTrG97L2uwcc4FClbTWSRiEvmWpLtR2k=</string>
 </dict>
 </plist>
